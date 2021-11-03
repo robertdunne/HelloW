@@ -1,0 +1,207 @@
+// Listing 8.1: Convert binary nibbles on switches to decimal
+//   1) X86 instructions are now defined as Verilog "macros"
+//   2) Uses X86 instructions: HLT, IN, OUT, IRET, and DAA
+//   3) KEY[1] is interrupt signal to read the switch contents
+//   4) KEY[0] resets this X86 imitation
+
+module X86_UI (KEY, CLOCK_50, SW, LEDR, HEX2, HEX3, HEX4, HEX5);
+ input  [1:0] KEY;
+ input  CLOCK_50;
+ input  [9:0] SW;
+ output [9:0] LEDR;
+ output [7:0] HEX2, HEX3, HEX4, HEX5;
+//  4-bit binary number displayed on 7-seg display in hexadecimal
+ function [7:0] digit;
+  input [3:0] num; 
+  case (num)
+    0:  digit = 8'b11000000;  // 0
+    1:  digit = 8'b11111001;  // 1
+    2:  digit = 8'b10100100;  // 2
+    3:  digit = 8'b10110000;  // 3
+    4:  digit = 8'b10011001;  // 4
+    5:  digit = 8'b10010010;  // 5
+    6:  digit = 8'b10000010;  // 6
+    7:  digit = 8'b11111000;  // 7
+    8:  digit = 8'b10000000;  // 8
+    9:  digit = 8'b10010000;  // 9
+    10: digit = 8'b10001000;  // A
+    11: digit = 8'b10000011;  // b
+    12: digit = 8'b11000110;  // C
+    13: digit = 8'b10100001;  // d
+    14: digit = 8'b10000110;  // E
+    15: digit = 8'b10001110;  // F
+   endcase
+  endfunction
+// Registers and memory for X86 imitation
+ reg [7:0] progMem [0:255]; // Program memory
+ reg [7:0] IP;              // Instruction Pointer
+ reg [63:0] RAX;            // Accumulator register (64 bits)
+ reg [63:0] RBX;            // "Base" register (64 bits)
+ reg [63:0] RCX;            // "Count" register (64 bits)
+ reg [63:0] RDX;            // "Destination" register (64 bits)
+ reg C_flag;                // Carry flag
+ reg A_flag;                // Auxilary Carry flag (DAA)
+ reg [7:0] RetAdr;          // Return Address for interrupt
+ reg [2:0] RetFlags;        // Flags saved during interrupt
+ reg run;                   // Mode: running or halted
+ reg intEn;                 // Interrupt enable flag
+ reg [7:0] OutPort0;        // Register for output bit display
+
+ assign HEX5 = digit(IP[7:4]);  // Display Instruction Pointer
+ assign HEX4 = digit(IP[3:0]);
+ assign HEX3 = digit(RAX[7:4]); // Display AL register
+ assign HEX2 = digit(RAX[3:0]);
+ assign LEDR[7:0] = OutPort0;   // Display output address 0
+ assign LEDR[9] = C_flag;       // Display status bits
+ assign LEDR[8] = A_flag;
+
+ parameter AL  = 20'h10000; // 8-bit register names
+ parameter BL  = 20'h10003;
+ parameter CL  = 20'h10001;
+ parameter DL  = 20'h10002;
+ parameter AH  = 20'h10004;
+ parameter BH  = 20'h10007;
+ parameter CH  = 20'h10005;
+ parameter DH  = 20'h10006;
+ parameter AX  = 20'h20000; // 16-bit register names
+ parameter BX  = 20'h20003; 
+ parameter CX  = 20'h20001; 
+ parameter DX  = 20'h20002; 
+
+//
+//---------------- Macro definitions for assembly language ----------------
+//
+// 8086 opcodes and instruction mnemonics
+ `define DAA  as0p ('h27  // Decimal Adjust of Addition
+ `define DEC  as1p ('h48, // Decrement AX register
+ `define HLT  as0p ('hF4  // Halt
+ `define IN   as2p ('hEC, // Input to register AL or AX
+ `define INC  as1p ('h40, // Increment AX register
+ `define INT  as0p ('hCC  // Software Interrupt
+ `define IRET as0p ('hCF  // Interrupt Return
+ `define NOP  as0p ('h90  // No Operation
+ `define OUT  as2p ('hEE, // Output contents of AL or AX
+ `define ORG  ador (      // Directive to set memory address
+ `define STC  as0p ('hF9; // Set Carry flag
+ `define _    );          // End of instruction
+
+//  Tasks to "assemble" X86 instructions into machine code
+ integer ADR;             // Assembly time instruction pointer
+
+ task as0p (); // No parameters with opcode
+  input [7:0] opcode;
+  progMem[ADR] <= opcode;
+  ADR = ADR + 1;
+ endtask
+
+ task as1p (); // One parameter with opcode
+  input [7:0] opcode;
+  input [19:0] P1;
+  progMem[ADR] <= opcode;
+  ADR = ADR + 1;
+ endtask
+
+ task as2p (); // Two parameters with opcode
+  input [7:0] opcode;
+  input [19:0] P1,P2;
+  progMem[ADR] <= opcode;
+  ADR = ADR + 1;
+ endtask
+
+ task ador (); // One parameter with directive
+  input [19:0] p1;
+  ADR = p1;
+ endtask
+
+ always @ (posedge(CLOCK_50))
+  begin
+// Reset when KEY[0] is pushed
+   if (KEY[0]==0)
+    begin
+//   Initial load of X86 "memory"
+//   Address 0 receives control on X86 imitation system reset
+     `ORG  0       `_ // Set assembly time memory address
+     `HLT  `_
+//   Address h10 receives control on illegal instruction interrupt
+     `ORG  'h10    `_ // Set assembly time memory address
+     `HLT  `_
+//   Address 'h20 receives control on I/O interrupt
+     `ORG  'h20    `_ // Set assembly time memory address
+     `IN   AL,(DX) `_ // Read switches into the AL register
+     `DAA          `_ // Convert value in AL to packed decimal
+     `OUT  (DX),AL `_ // Write AL register contents to LEDs
+     `IRET         `_ // Go back to IP address interrupted
+
+     progMem['hFF] <= 0; // Mark end of X86 "memory"
+     IP <= 0;            // Initialize Instruction Pointer register
+     run <= 1;           // Initialize Halt/Run mode
+     intEn <= 1;         // Enable I/O and software interupts
+    end
+   else
+//  I/O Interrupt when KEY[1] is pushed and interrupts enabled
+    if (KEY[1]==0 & intEn)
+     begin
+      IP <= 'h20;        // Set IP to interrupt service routine
+      RetAdr <= IP;      // Address of instruction after interrupt
+      RetFlags <= {intEn,C_flag,A_flag};
+      intEn <= 0;        // Disable further interrupts
+      run <= 1;          // Halt instruction may have executed
+     end
+    else
+//   Execute the 8086 instruction at the current IP address.
+if (run)
+ case (progMem[IP])    // Opcode in first byte of instruction
+  'h27:                // DAA: Decimal Adjust for Addition
+   begin
+    if (RAX[3:0]>9 | A_flag) 
+     RAX[3:0] <= RAX[3:0] + 6;
+    if (RAX[7:4]>9 | C_flag) 
+     RAX[7:4] <= RAX[7:4] + 6;
+    A_flag <= (RAX[3:0]>9 | A_flag) ? 1 : 0;
+    C_flag <= (RAX[7:4]>9 | C_flag) ? 1 : 0;
+    IP <= IP + 1;
+   end
+  'h48:                // DEC: Subtract 1 from value in AX
+   begin
+    RAX[15:0] <= RAX[15:0] - 1;
+    IP <= IP + 1;
+   end
+  'hF4:                // HLT: Halt
+   run <= 0;
+  'hEC:                // IN: Input; Copy input port into register AL
+   begin
+    RAX[7:0] <= SW[7:0];   // Input port 0 is assigned to switches
+    IP <= IP + 1;
+   end
+  'h40:                // INC: Add 1 to value in register AX
+   begin
+    RAX[15:0] <= RAX[15:0] + 1;
+    IP <= IP + 1;
+   end
+  'hCC:                // INT: Software Interrupt
+   begin
+    RetAdr <= IP;
+    IP <= 'h20;
+   end
+  'hCF:                // IRET: Interrupt Return
+   begin
+    {intEn,C_flag,A_flag} <= RetFlags;
+    IP <= RetAdr;
+   end
+  'h90:                // NOP: No Operation
+   IP <= IP + 1;
+  'hEE:                // OUT: Output; Copy AL contents to output port\begin
+   begin
+    OutPort0 <= RAX[7:0];   // Output port 0 (buffer for LEDs)
+    IP <= IP + 1;
+   end
+  'hF9:                // STC: Set Carry flag
+   begin
+    C_flag <= 1;
+    IP <= IP + 1;
+   end
+  default:             // Undefined Operation Code
+   IP <= 'h10;
+ endcase
+end
+endmodule
